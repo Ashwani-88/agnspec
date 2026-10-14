@@ -1,0 +1,188 @@
+Metadata-Version: 2.4
+Name: agnspec
+Version: 0.1.0
+Summary: A component-oriented package for fitting AGN optical/UV spectra.
+Author: Your Name
+License: MIT
+Requires-Python: >=3.9
+Description-Content-Type: text/markdown
+Requires-Dist: numpy>=1.21
+Requires-Dist: scipy>=1.7
+Requires-Dist: matplotlib>=3.4
+Requires-Dist: astropy>=5.0
+Provides-Extra: mcmc
+Requires-Dist: emcee>=3.1; extra == "mcmc"
+Provides-Extra: nested
+Requires-Dist: dynesty>=2.0; extra == "nested"
+Provides-Extra: extinction
+Requires-Dist: dust_extinction>=1.0; extra == "extinction"
+Provides-Extra: all
+Requires-Dist: emcee>=3.1; extra == "all"
+Requires-Dist: dynesty>=2.0; extra == "all"
+Requires-Dist: dust_extinction>=1.0; extra == "all"
+
+# agnspec
+
+A component-oriented Python package for fitting AGN (Active Galactic
+Nucleus) optical/UV spectra.
+
+## Design
+
+The package is organized around *physical spectral components* rather
+than *fitting steps*:
+
+```
+AGNModel
+├── Continuum
+│   ├── PowerLaw
+│   ├── HostGalaxy
+│   ├── BalmerContinuum
+│   └── FeII
+│
+├── EmissionLines
+│   ├── HbetaComplex
+│   ├── HalphaComplex
+│   ├── MgIIComplex
+│   ├── CIVComplex
+│   └── OIIIComplex
+│
+├── Fitters
+│   ├── LeastSquares
+│   ├── MCMC
+│   └── NestedSampling
+│
+├── Measurements
+├── Plotting
+└── Pipeline
+```
+
+Every continuum component (`PowerLaw`, `HostGalaxy`, `BalmerContinuum`,
+`FeII`) and every line complex (`HbetaComplex`, `HalphaComplex`, ...)
+exposes the same small interface:
+
+```python
+component.model(wave, *params)       # -> model flux
+component.initial_guess(wave, flux)  # -> starting parameter vector
+component.bounds()                   # -> (lower, upper)
+component.param_names                # or .free_param_names
+```
+
+This lets any `Fitter` (`LeastSquares`, `MCMC`, `NestedSampling`)
+operate on any component, or on the combined `ContinuumModel` /
+`LineComplex` objects, without special-casing.
+
+## Module map
+
+| Module              | Contents                                                        |
+|----------------------|------------------------------------------------------------------|
+| `io.py`              | `read_spectrum`, `save_results`, `load_results`                 |
+| `preprocessing.py`   | `to_rest_frame`, `deredden_galactic`, `mask_bad_pixels`, `smooth_spectrum` |
+| `continuum.py`       | `PowerLaw`, `HostGalaxy`, `BalmerContinuum`, `FeII`, `ContinuumModel`, `fit_continuum`, `fit_powerlaw`, `fit_host_galaxy`, `fit_feii`, `get_continuum_mask` |
+| `emission_lines.py`  | `GaussianComponent`, `LineComplex`, `HbetaComplex`, `HalphaComplex`, `MgIIComplex`, `CIVComplex`, `OIIIComplex`, `fit_gaussian`, `fit_multiple_gaussians`, `extract_region` |
+| `fitting.py`         | `Fitter`, `LeastSquares`, `MCMC`, `NestedSampling`, `mcmc_fit`, `FitResult` |
+| `measurements.py`    | `equivalent_width`, `line_flux`, `fwhm`, `sigma_velocity`, `velocity_shift`, `line_luminosity`, `virial_blackhole_mass`, `eddington_ratio`, `bolometric_luminosity` |
+| `uncertainties.py`   | `bootstrap_errors`, `residual_bootstrap_errors`, `credible_interval`, `propagate_errors` |
+| `plotting.py`        | `plot_spectrum`, `plot_continuum_fit`, `plot_line_fit`           |
+| `utils.py`           | Constants, `LINE_WAVELENGTHS`, Gaussian helpers, unit conversions |
+| `models.py`          | `AGNModel` — the top-level object tying everything together      |
+| `pipeline.py`        | `run_pipeline` — the full read -> ... -> save pipeline           |
+
+## Pipeline flow
+
+```
+Read spectrum
+      |
+Preprocess
+      |
+Correct extinction
+      |
+Shift to rest frame
+      |
+Mask bad pixels
+      |
+Fit continuum
+      |
+Subtract continuum
+      |
+Fit emission lines
+      |
+Measure line properties
+      |
+Estimate uncertainties
+      |
+Generate plots
+      |
+Save outputs
+```
+
+## Quick start (procedural)
+
+```python
+from agnspec.pipeline import run_pipeline
+
+model, results = run_pipeline(
+    filename="spectrum.fits",
+    z=0.35,
+    ebv=0.02,
+    line="Hbeta",
+    output_dir="./agnspec_output",
+)
+
+print(results["line_measurements"]["hbeta_broad"]["fwhm"])
+```
+
+## Quick start (component-oriented / object API)
+
+```python
+import numpy as np
+from agnspec import io, preprocessing as prep
+from agnspec.continuum import PowerLaw, FeII, get_continuum_mask
+from agnspec.emission_lines import HbetaComplex
+from agnspec.fitting import LeastSquares, MCMC
+from agnspec.models import AGNModel
+
+wave, flux, err, hdr = io.read_spectrum("spectrum.fits")
+flux = prep.deredden_galactic(wave, flux, ebv=0.02)
+wave, flux = prep.to_rest_frame(wave, flux, z=0.35)
+good = prep.mask_bad_pixels(wave, flux, err)
+wave, flux, err = wave[good], flux[good], (err[good] if err is not None else None)
+
+# Build a model: power law + Fe II continuum, Hbeta+[OIII] emission lines
+model = AGNModel(
+    continuum_components=[PowerLaw()],
+    fitter=LeastSquares(),
+)
+model.add_line_complex("Hbeta", HbetaComplex(include_oiii=True))
+
+windows = [(4200, 4230), (5080, 5130)]
+model.fit_continuum(wave, flux, error=err, continuum_windows=windows)
+cont = model.continuum_flux(wave)
+
+line_flux = flux - cont
+model.fit_line("Hbeta", wave, line_flux, err)
+
+measurements = model.measure_line("Hbeta")
+model.plot_continuum()
+model.plot_line("Hbeta", wave, line_flux)
+```
+
+To instead fit with full Bayesian MCMC (e.g. for the line complex):
+
+```python
+model.fitter = MCMC(n_walkers=32, n_steps=3000, n_burn=500)
+model.fit_line("Hbeta", wave, line_flux, err)
+```
+
+## Optional dependencies
+
+* `emcee` — required for `fitting.MCMC`
+* `dynesty` — required for `fitting.NestedSampling`
+* `dust_extinction` — used by `preprocessing.deredden_galactic` for
+  accurate Fitzpatrick99/CCM89/O94 extinction curves (a simplified
+  analytic CCM89 fallback is used if it's not installed)
+
+Install everything with:
+
+```bash
+pip install agnspec[all]
+```
