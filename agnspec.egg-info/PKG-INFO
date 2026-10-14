@@ -2,7 +2,7 @@ Metadata-Version: 2.4
 Name: agnspec
 Version: 0.1.0
 Summary: A component-oriented package for fitting AGN optical/UV spectra.
-Author: Your Name
+Author: Ashwani Pandey
 License: MIT
 Requires-Python: >=3.9
 Description-Content-Type: text/markdown
