@@ -1,30 +1,22 @@
 """
-fitting.py
-==========
+Fitting backends.
 
-Generic fitting engines ("Fitters") that operate on any object
-exposing the small interface used throughout ``agnspec``:
+A fitter works on any object that has ``model(wave, *params)``,
+``initial_guess(wave, flux)``, ``bounds()`` and ``param_names`` (or
+``free_param_names``). That covers :class:`agnspec.continuum.ContinuumModel`, the
+individual continuum components, :class:`agnspec.balmer.BalmerPseudoContinuum`,
+:class:`agnspec.optical_region.OpticalRegionModel` and every
+:class:`agnspec.emission_lines.LineComplex`.
 
-    model(wave, *params)      -> ndarray
-    initial_guess(wave, flux) -> sequence
-    bounds()                  -> (lower, upper)
-    param_names (or free_param_names) -> list of str
-
-This includes :class:`continuum.ContinuumModel`,
-:class:`continuum.PowerLaw`, :class:`emission_lines.LineComplex`, and
-subclasses thereof, so the same ``LeastSquares``/``MCMC``/
-``NestedSampling`` classes work for continuum and line fitting alike.
-
-    Fitters
-    ├── LeastSquares
-    ├── MCMC
-    └── NestedSampling
+* :class:`LeastSquares`   -- weighted non-linear least squares (``scipy.curve_fit``)
+* :class:`MCMC`           -- posterior sampling with ``emcee``
+* :class:`NestedSampling` -- posterior sampling and evidence with ``dynesty``
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Optional, Sequence, Tuple
+from typing import Any, Dict, Optional, Sequence
 
 import numpy as np
 from scipy.optimize import curve_fit
@@ -36,7 +28,7 @@ def _get_param_names(model_obj):
 
 @dataclass
 class FitResult:
-    """Container for the outcome of any Fitter.fit() call."""
+    """What a :meth:`Fitter.fit` call returns."""
 
     params: np.ndarray
     param_names: Sequence[str]
@@ -63,14 +55,11 @@ class Fitter:
         raise NotImplementedError
 
 
-# ----------------------------------------------------------------------
-# Least squares (fast, default)
-# ----------------------------------------------------------------------
 class LeastSquares(Fitter):
     """
-    Weighted nonlinear least-squares fitting via
-    ``scipy.optimize.curve_fit`` (Levenberg-Marquardt / trust-region
-    reflective, depending on whether bounds are supplied).
+    Weighted non-linear least squares with ``scipy.optimize.curve_fit``.
+    Bounds are always passed, so the trust-region reflective algorithm is used.
+    ``param_errors`` are the square roots of the covariance diagonal.
     """
 
     def __init__(self, maxfev: int = 50000):
@@ -93,7 +82,7 @@ class LeastSquares(Fitter):
         perr = np.sqrt(np.diag(pcov))
 
         model_flux = model_obj.model(wave, *popt)
-        resid = (flux - model_flux)
+        resid = flux - model_flux
         if sigma is not None:
             chi2 = float(np.nansum((resid / sigma) ** 2))
         else:
@@ -106,13 +95,17 @@ class LeastSquares(Fitter):
         )
 
 
-# ----------------------------------------------------------------------
-# MCMC (emcee)
-# ----------------------------------------------------------------------
 class MCMC(Fitter):
     """
-    Bayesian fitting via affine-invariant ensemble MCMC
-    (`emcee <https://emcee.readthedocs.io>`_).
+    Posterior sampling with the affine-invariant ensemble sampler in
+    `emcee <https://emcee.readthedocs.io>`_.
+
+    The prior is uniform inside ``model.bounds()``, the likelihood is Gaussian
+    with the supplied errors, and the walkers start in a tight ball around
+    ``p0`` (default: ``model.initial_guess``). Pass a least-squares solution as
+    ``p0`` for best results. The result holds the median and standard
+    deviation of the post-burn-in samples; the sampler itself is in
+    ``result.extra["sampler"]``.
     """
 
     def __init__(self, n_walkers: int = 32, n_steps: int = 2000,
@@ -162,8 +155,14 @@ class MCMC(Fitter):
         walkers0 = p0 + spread * rng.normal(size=(self.n_walkers, ndim))
         walkers0 = np.clip(walkers0, lower + 1e-8, upper - 1e-8)
 
+        # emcee draws its own random numbers, so the seed has to be handed over
+        # through the initial state for the chain to be reproducible
+        state = walkers0
+        if self.seed is not None:
+            state = emcee.State(walkers0, random_state=np.random.RandomState(self.seed).get_state())
+
         sampler = emcee.EnsembleSampler(self.n_walkers, ndim, log_prob)
-        sampler.run_mcmc(walkers0, self.n_steps, progress=False)
+        sampler.run_mcmc(state, self.n_steps, progress=False)
 
         samples = sampler.get_chain(discard=self.n_burn, flat=True)
         params = np.median(samples, axis=0)
@@ -176,32 +175,12 @@ class MCMC(Fitter):
         )
 
 
-def mcmc_fit(wave, flux, error, model):
-    """
-    Procedural convenience wrapper: run :class:`MCMC` with default
-    settings on a model object.
-
-    Parameters
-    ----------
-    wave, flux, error : ndarray
-    model : object
-        Any object with ``model``, ``initial_guess``, ``bounds``.
-
-    Returns
-    -------
-    FitResult
-    """
-    return MCMC().fit(wave, flux, error, model)
-
-
-# ----------------------------------------------------------------------
-# Nested sampling (dynesty)
-# ----------------------------------------------------------------------
 class NestedSampling(Fitter):
     """
-    Bayesian fitting + evidence estimation via nested sampling
-    (`dynesty <https://dynesty.readthedocs.io>`_). Useful for
-    rigorous model comparison (e.g. 1 vs 2 Gaussian components).
+    Nested sampling with `dynesty <https://dynesty.readthedocs.io>`_. Gives
+    posterior samples and the log evidence, which is useful for comparing
+    models (for example one against two Gaussian components). The prior is
+    uniform inside ``model.bounds()``, so every bound must be finite.
     """
 
     def __init__(self, n_live: int = 250, seed: Optional[int] = None):
@@ -232,8 +211,9 @@ class NestedSampling(Fitter):
             resid = flux - model_flux
             return -0.5 * np.sum((resid / sigma) ** 2 + np.log(2 * np.pi * sigma ** 2))
 
+        rstate = np.random.default_rng(self.seed) if self.seed is not None else None
         sampler = dynesty.NestedSampler(
-            log_likelihood, prior_transform, ndim, nlive=self.n_live,
+            log_likelihood, prior_transform, ndim, nlive=self.n_live, rstate=rstate,
         )
         sampler.run_nested(print_progress=False)
         results = sampler.results

@@ -1,62 +1,64 @@
 """
-balmer.py
-=========
+Balmer pseudo-continuum after Kovacevic, Popovic & Kollatschny (2014, Adv. Space
+Res. 54, 1347), "A model for the Balmer pseudocontinuum in spectra of type 1
+AGNs" (KPK14 below).
 
-Balmer *pseudo*-continuum following Kovacevic, Popovic & Kollatschny
-(2013, Adv. Space Res.), "A model for the Balmer pseudocontinuum in
-spectra of type 1 AGNs" (hereafter KPK13).
+The model has two parts.
 
-Physics / recipe (paper Sect. 2)
---------------------------------
-* lambda > lambda_BE : a *series* of broad Balmer lines (upper level
-  n = 4 ... 400 -- H-beta, H-gamma, ... n=400), all with the same
-  velocity width and the same velocity shift, with *fixed relative
-  intensities* (Storey & Hummer 1995, case B, T=15000 K, ne=1e10 for
-  n <= 50; Boltzmann factor, paper Eq. 4, for 50 < n <= 400).
-  Their overlap produces the smooth rise to the Balmer edge.
-* lambda <= lambda_BE : partially optically-thick Balmer continuum
-  (Grandi 1982), uniform T_e = 15000 K and tau_BE = 1 (Kurk+2007):
+* Redward of the Balmer edge: a series of broad Balmer lines (upper level
+  n = 4 to 400, i.e. H-beta, H-gamma, ... n = 400). All lines share one
+  velocity width and one velocity shift, and their relative intensities are
+  fixed: Storey & Hummer (1995) case B values (T = 15000 K, ne = 1e10) for
+  n <= 50 and a Boltzmann factor (KPK14 Eq. 4) for 50 < n <= 400. The
+  overlapping wings of these lines produce the smooth rise towards the edge.
+* Blueward of the edge: a partially optically thick Balmer continuum
+  (Grandi 1982) with T_e = 15000 K and tau_BE = 1 (Kurk et al. 2007),
 
-      F(l) = F_BaC * B_l(Te) * (1 - exp(-tau_l)),  tau_l = tau_BE (l_BE/l)^3
+      F(l) = F_BaC * B_l(Te) * (1 - exp(-tau_l)),   tau_l = tau_BE * (l_BE / l)**3
 
-  where F_BaC is *not* free: requiring continuity at the edge,
-  F_BaC * B_BE(Te) (1 - exp(-tau_BE)) = sum_{i>=6} G_i(lambda_BE)
-  (paper Eqs. 5 and 7).
+  F_BaC is not a free parameter. Continuity at the edge requires
+  F_BaC * B_BE(Te) * (1 - exp(-tau_BE)) = sum over n >= 6 of G_n(l_BE)
+  (KPK14 Eqs. 5 and 7).
 
-Free parameters of the component: integrated flux, velocity width and
-velocity shift of the H-beta Gaussian of the series.  (With the
-power-law component, KPK13's "four free parameters" are alpha, W,
-delta and I(H-beta); the power-law normalisation F_5600 is a fifth.)
+The free parameters of the component are the integrated flux, velocity width
+and velocity shift of the H-beta Gaussian of the series. Together with a power
+law (index, normalisation) that makes five parameters in a full fit.
 
-Implementation notes / deliberate choices (see README_BALMER_CHANGES.md)
------------------------------------------------------------------------
-* Wavelengths are *vacuum* (SDSS convention): lambda_n from the
-  Rydberg formula with R_H = 109677.583 cm^-1, Balmer limit 3647.05 A.
-* Each line is a flux-normalised Gaussian with sigma_n = lambda_n *
-  sigma_v / c (common *velocity* width).  Relative intensities are
-  treated as relative integrated *fluxes* (energy emissivities).
-* The Storey & Hummer (1995) table is NOT bundled.  A built-in
-  approximation (case-B decrement for n<=11 from the standard
-  textbook values, ~ n^-3 beyond) is used unless you pass a real
-  table (``table=`` or ``source="pyneb"``).  The result for the
-  Balmer-edge height depends on these ratios, so use the real table
-  for publication-grade numbers.
+Implementation choices
+----------------------
+* Wavelengths are vacuum (the SDSS convention): lambda_n comes from the
+  Rydberg formula with R_H = 109677.583 cm^-1, which puts the Balmer limit at
+  3647.05 A.
+* Each line is a flux-normalised Gaussian with sigma_n = lambda_n * sigma_v / c,
+  and the relative intensities are treated as relative integrated fluxes.
+* The Storey & Hummer (1995) table is not bundled. Unless you pass a real table
+  (``table=`` or :func:`pyneb_ratio_table`), a built-in approximation is used:
+  textbook case-B ratios up to n = 11 and an n**-3 law beyond. The height of
+  the Balmer edge depends on these ratios, so use the real table for
+  publication-quality numbers.
 """
 
 from __future__ import annotations
 
-from typing import Dict, Optional
+from typing import Dict
 
 import numpy as np
 from scipy.integrate import simpson
 
-from .continuum import ContinuumComponent, BalmerContinuum
+from .continuum import ContinuumComponent
+from .utils import C_KMS, H_PLANCK, K_BOLTZ
 
-C_KMS = 2.99792458e5
 R_H = 109677.583            # cm^-1, hydrogen (reduced-mass) Rydberg
 EDGE_VAC = 4.0e8 / R_H      # Angstrom (vacuum Balmer limit, 3647.05)
 EV_ZERO_TO_IONIZATION = 13.598434   # eV
 K_B_EV = 8.617333262e-5     # eV / K
+
+
+def planck_lambda(wave_ang, te):
+    """Planck function B_lambda(T) in cgs; ``wave_ang`` in Angstrom."""
+    lam_cm = np.asarray(wave_ang, dtype=float) * 1e-8
+    c_cms = C_KMS * 1e5
+    return (2.0 * H_PLANCK * c_cms ** 2 / lam_cm ** 5) / np.expm1(H_PLANCK * c_cms / (lam_cm * K_BOLTZ * te))
 
 
 def balmer_wavelengths(n):
@@ -65,12 +67,10 @@ def balmer_wavelengths(n):
     return 1.0e8 / (R_H * (0.25 - 1.0 / n ** 2))
 
 
-# ----------------------------------------------------------------------
 # Relative line intensities
-# ----------------------------------------------------------------------
-# Case-B Balmer decrement relative to H-beta (=1) at T ~ 1e4 K,
+# Case-B Balmer decrement relative to H-beta (= 1) at T ~ 1e4 K and
 # ne ~ 1e2-1e4 cm^-3 (textbook values, e.g. Osterbrock & Ferland 2006,
-# Table 4.4).  APPROXIMATE stand-in for Storey & Hummer (1995).
+# Table 4.4). An approximation to Storey & Hummer (1995), not the real table.
 _BUILTIN_RATIOS = {
     4: 1.000,    # H-beta
     5: 0.468,    # H-gamma
@@ -131,7 +131,7 @@ def balmer_ratios(n, T=15000.0, high_n="boltzmann", n_table_max=50, table=None):
     Relative intensities I_n / I_Hbeta for upper levels ``n`` (>= 4).
 
     n <= n_table_max : lookup in ``table`` (default: built-in approx.)
-    n  > n_table_max : ``high_n="boltzmann"`` -> KPK13 Eq. (4):
+    n  > n_table_max : ``high_n="boltzmann"`` -> KPK14 Eq. (4):
                            I_n = I_50 * exp(-(E_n - E_50)/kT)
                        ``high_n="n3"``        -> I_n = I_50 (50/n)^3
                        (the asymptotic low-density recombination
@@ -159,12 +159,10 @@ def balmer_ratios(n, T=15000.0, high_n="boltzmann", n_table_max=50, table=None):
     return out
 
 
-# ----------------------------------------------------------------------
 # The component
-# ----------------------------------------------------------------------
 class BalmerPseudoContinuum(ContinuumComponent):
     """
-    KPK13 Balmer pseudo-continuum (high-order Balmer lines for
+    KPK14 Balmer pseudo-continuum (high-order Balmer lines for
     lambda > edge, partially thick Balmer continuum for lambda <= edge).
 
     Parameters (of ``model``)
@@ -177,10 +175,10 @@ class BalmerPseudoContinuum(ContinuumComponent):
     Constructor options
     -------------------
     te, tau_be : electron temperature (K) and optical depth at the edge
-                 (KPK13: 15000 K, 1.0).
+                 (KPK14: 15000 K, 1.0).
     n_max      : highest upper level (400).
     n_edge_min : first level entering the edge sum, paper Eq. (5) -> 6.
-    high_n     : "boltzmann" (KPK13 Eq. 4) or "n3".
+    high_n     : "boltzmann" (KPK14 Eq. 4) or "n3".
     table      : optional {n: ratio} (e.g. real Storey & Hummer values).
     """
 
@@ -221,7 +219,7 @@ class BalmerPseudoContinuum(ContinuumComponent):
 
     def f_bac(self, flux_hb, sigma_v, dv):
         """Paper Eq. (7): Balmer-continuum scale F_BaC (not a free parameter)."""
-        b_edge = BalmerContinuum._planck_lambda(self.edge, self.te)
+        b_edge = planck_lambda(self.edge, self.te)
         return self.edge_flux_density(flux_hb, sigma_v, dv) / (
             b_edge * (-np.expm1(-self.tau_be)))
 
@@ -234,11 +232,11 @@ class BalmerPseudoContinuum(ContinuumComponent):
             w = wave[below]
             tau = self.tau_be * (self.edge / w) ** 3
             out[below] = self.f_bac(flux_hb, sigma_v, dv) * \
-                BalmerContinuum._planck_lambda(w, self.te) * (-np.expm1(-tau))
+                planck_lambda(w, self.te) * (-np.expm1(-tau))
         return out
 
     def balmer_lines(self, wave, flux_hb, sigma_v, dv):
-        """High-order Balmer-line series (zero for lambda <= edge, as in KPK13)."""
+        """High-order Balmer-line series (zero for lambda <= edge, as in KPK14)."""
         wave = np.asarray(wave, dtype=float)
         out = np.zeros_like(wave)
         above = wave > self.edge

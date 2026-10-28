@@ -1,47 +1,54 @@
 """
-uncertainties.py
-=================
-
-Uncertainty estimation for fitted parameters and derived
-measurements: flux-error bootstrap resampling, posterior-based
-credible intervals (from MCMC/nested-sampling chains), and simple
-first-order error propagation for derived quantities like FWHM,
-luminosity, and black-hole mass.
+Uncertainties: bootstrap refits, credible intervals from posterior samples,
+and Monte Carlo error propagation.
 """
 
 from __future__ import annotations
 
-from typing import Callable, Dict, Optional, Sequence
+from typing import Callable, Optional, Sequence
 
 import numpy as np
 
-from .fitting import Fitter, LeastSquares, FitResult
+from .fitting import Fitter, LeastSquares
+
+
+def _refit_many(wave, error, model_obj, fitter, p0, resampled_fluxes):
+    """Refit every resampled flux array; failed fits are skipped."""
+    samples = []
+    for flux_resampled in resampled_fluxes:
+        try:
+            samples.append(fitter.fit(wave, flux_resampled, error, model_obj, p0=p0).params)
+        except Exception:
+            continue
+
+    samples = np.array(samples)
+    if samples.size == 0:
+        raise RuntimeError("All bootstrap iterations failed to converge.")
+    return np.median(samples, axis=0), np.std(samples, axis=0), samples
 
 
 def bootstrap_errors(wave, flux, error, model_obj, n_boot: int = 200,
-                      fitter: Optional[Fitter] = None, seed: Optional[int] = None):
+                     fitter: Optional[Fitter] = None, seed: Optional[int] = None):
     """
-    Estimate parameter uncertainties by resampling the flux within
-    its errors (parametric bootstrap) and refitting.
+    Parametric bootstrap: perturb the flux with Gaussian noise of the given
+    1-sigma errors and refit ``n_boot`` times.
 
     Parameters
     ----------
     wave, flux, error : ndarray
+        If ``error`` is None, 5 per cent of the flux standard deviation is used.
     model_obj : object
-        Model exposing ``model``, ``initial_guess``, ``bounds``.
+        Anything with ``model``, ``initial_guess`` and ``bounds``.
     n_boot : int
-        Number of bootstrap iterations.
     fitter : Fitter, optional
-        Defaults to :class:`fitting.LeastSquares`.
+        Defaults to :class:`agnspec.fitting.LeastSquares`.
     seed : int, optional
 
     Returns
     -------
-    param_median : ndarray
-    param_std : ndarray
-    samples : ndarray, shape (n_boot, n_params)
-        All bootstrap best-fit parameter vectors (failed iterations
-        are dropped).
+    param_median, param_std : ndarray
+    samples : ndarray, shape (n_ok, n_params)
+        Best-fit parameters of every successful refit.
     """
     wave = np.asarray(wave, dtype=float)
     flux = np.asarray(flux, dtype=float)
@@ -49,45 +56,26 @@ def bootstrap_errors(wave, flux, error, model_obj, n_boot: int = 200,
 
     fitter = fitter or LeastSquares()
     rng = np.random.default_rng(seed)
-
-    samples = []
     p0 = model_obj.initial_guess(wave, flux)
-    for _ in range(n_boot):
-        flux_resampled = flux + rng.normal(scale=error)
-        try:
-            result = fitter.fit(wave, flux_resampled, error, model_obj, p0=p0)
-            samples.append(result.params)
-        except Exception:
-            continue
 
-    samples = np.array(samples)
-    if samples.size == 0:
-        raise RuntimeError("All bootstrap iterations failed to converge.")
-
-    return np.median(samples, axis=0), np.std(samples, axis=0), samples
+    fluxes = (flux + rng.normal(scale=error) for _ in range(n_boot))
+    return _refit_many(wave, error, model_obj, fitter, p0, fluxes)
 
 
 def residual_bootstrap_errors(wave, flux, error, model_obj, best_fit_params,
-                               n_boot: int = 200, fitter: Optional[Fitter] = None,
-                               seed: Optional[int] = None):
+                              n_boot: int = 200, fitter: Optional[Fitter] = None,
+                              seed: Optional[int] = None):
     """
-    Bootstrap by resampling (with replacement) the residuals of the
-    best fit, rather than drawing fresh Gaussian noise -- useful when
-    the true noise model is uncertain or non-Gaussian.
+    Residual bootstrap: resample the residuals of the best fit with
+    replacement and refit. Useful when the noise is not well described by the
+    quoted errors.
 
     Parameters
     ----------
-    wave, flux, error : ndarray
-    model_obj : object
     best_fit_params : sequence
-        Best-fit parameter vector from an initial fit.
-    n_boot : int
-    fitter : Fitter, optional
-    seed : int, optional
+        Parameter vector from an earlier fit; also the starting point of every refit.
 
-    Returns
-    -------
-    param_median, param_std, samples : as in :func:`bootstrap_errors`
+    The other parameters and the return values are as in :func:`bootstrap_errors`.
     """
     wave = np.asarray(wave, dtype=float)
     flux = np.asarray(flux, dtype=float)
@@ -97,40 +85,25 @@ def residual_bootstrap_errors(wave, flux, error, model_obj, best_fit_params,
     model_flux = model_obj.model(wave, *best_fit_params)
     residuals = flux - model_flux
 
-    samples = []
-    for _ in range(n_boot):
-        boot_resid = rng.choice(residuals, size=residuals.size, replace=True)
-        flux_resampled = model_flux + boot_resid
-        try:
-            result = fitter.fit(wave, flux_resampled, error, model_obj, p0=best_fit_params)
-            samples.append(result.params)
-        except Exception:
-            continue
-
-    samples = np.array(samples)
-    if samples.size == 0:
-        raise RuntimeError("All bootstrap iterations failed to converge.")
-
-    return np.median(samples, axis=0), np.std(samples, axis=0), samples
+    fluxes = (model_flux + rng.choice(residuals, size=residuals.size, replace=True)
+              for _ in range(n_boot))
+    return _refit_many(wave, error, model_obj, fitter, best_fit_params, fluxes)
 
 
 def credible_interval(samples, level: float = 0.68):
     """
-    Compute a symmetric (median +/- half-width) credible interval
-    from posterior samples (e.g. from :class:`fitting.MCMC` or
-    :class:`fitting.NestedSampling`).
+    Equal-tailed credible interval from posterior samples (for example from
+    :class:`agnspec.fitting.MCMC`).
 
     Parameters
     ----------
     samples : ndarray, shape (n_samples,) or (n_samples, n_params)
     level : float
-        Credible interval mass (e.g. 0.68 for ~1 sigma, 0.95 for ~2
-        sigma).
+        Probability mass inside the interval (0.68 is about 1 sigma).
 
     Returns
     -------
     median, lower, upper : ndarray or float
-        Median and the lower/upper bounds of the credible interval.
     """
     samples = np.asarray(samples)
     lo_pct = 100 * (1 - level) / 2
@@ -142,29 +115,25 @@ def credible_interval(samples, level: float = 0.68):
 
 
 def propagate_errors(func: Callable, values: Sequence[float], errors: Sequence[float],
-                      n_samples: int = 10000, seed: Optional[int] = None):
+                     n_samples: int = 10000, seed: Optional[int] = None):
     """
-    Monte Carlo error propagation through an arbitrary function of
-    several correlated-or-not parameters, e.g. propagating FWHM and
-    L5100 errors through :func:`measurements.virial_blackhole_mass`.
+    Monte Carlo error propagation through ``func``, for example FWHM and
+    L5100 uncertainties through :func:`agnspec.measurements.virial_blackhole_mass`.
 
     Parameters
     ----------
     func : callable
         ``func(*values) -> float``
     values : sequence of float
-        Best-fit central values of each input.
+        Central value of each input.
     errors : sequence of float
-        1-sigma uncertainties of each input (assumed independent,
-        Gaussian).
+        1-sigma error of each input (independent and Gaussian).
     n_samples : int
     seed : int, optional
 
     Returns
     -------
     median, sigma : float
-        Monte Carlo estimate of the propagated central value and
-        uncertainty.
     samples : ndarray
     """
     rng = np.random.default_rng(seed)

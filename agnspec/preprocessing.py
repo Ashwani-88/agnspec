@@ -1,14 +1,9 @@
 """
-preprocessing.py
-================
-
-Spectrum preprocessing: rest-frame transformation, Galactic-extinction
-correction, bad-pixel masking, and smoothing for visualization.
+Spectrum preprocessing: rest-frame shift, Galactic dereddening, bad-pixel
+masking and smoothing for display.
 """
 
 from __future__ import annotations
-
-from typing import Optional, Sequence, Tuple
 
 import numpy as np
 from scipy.ndimage import gaussian_filter1d
@@ -16,10 +11,11 @@ from scipy.ndimage import gaussian_filter1d
 
 def to_rest_frame(wave, z):
     """
-    Convert observed spectrum to rest frame. Only shift wavelength to rest frame.
+    Shift the wavelength axis to the rest frame, lambda_rest = lambda_obs / (1 + z).
 
-    lambda_rest = lambda_obs / (1 + z)
-    
+    Only the wavelength changes. Flux density and errors are left exactly as
+    they are, so integrals over the rest-frame axis are smaller than the
+    observed-frame ones by a factor of (1 + z).
 
     Parameters
     ----------
@@ -32,19 +28,78 @@ def to_rest_frame(wave, z):
     -------
     wave_rest : ndarray
     """
+    return np.asarray(wave, dtype=float) / (1.0 + z)
+
+
+def _ccm89_alambda(wave, a_v, rv=3.1):
+    """
+    Cardelli, Clayton & Mathis (1989) extinction curve, A_lambda in mag.
+    Pure-numpy version used when the ``extinction`` package is not installed.
+    Valid from 1000 A to 3.3 micron (x = 0.3 - 10 per micron).
+    """
     wave = np.asarray(wave, dtype=float)
-    wave_rest = wave / (1.0 + z)
+    x = 1e4 / wave                       # inverse microns
+    a = np.zeros_like(x)
+    b = np.zeros_like(x)
 
-    return wave_rest
+    ir = (x >= 0.3) & (x < 1.1)
+    a[ir] = 0.574 * x[ir] ** 1.61
+    b[ir] = -0.527 * x[ir] ** 1.61
+
+    op = (x >= 1.1) & (x < 3.3)
+    y = x[op] - 1.82
+    a[op] = (1 + 0.17699 * y - 0.50447 * y**2 - 0.02427 * y**3
+             + 0.72085 * y**4 + 0.01979 * y**5 - 0.77530 * y**6
+             + 0.32999 * y**7)
+    b[op] = (1.41338 * y + 2.28305 * y**2 + 1.07233 * y**3
+             - 5.38434 * y**4 - 0.62251 * y**5 + 5.30260 * y**6
+             - 2.09002 * y**7)
+
+    uv = (x >= 3.3) & (x < 8.0)
+    xu = x[uv]
+    fa = np.where(xu > 5.9, -0.04473 * (xu - 5.9) ** 2 - 0.009779 * (xu - 5.9) ** 3, 0.0)
+    fb = np.where(xu > 5.9, 0.2130 * (xu - 5.9) ** 2 + 0.1207 * (xu - 5.9) ** 3, 0.0)
+    a[uv] = 1.752 - 0.316 * xu - 0.104 / ((xu - 4.67) ** 2 + 0.341) + fa
+    b[uv] = -3.090 + 1.825 * xu + 1.206 / ((xu - 4.62) ** 2 + 0.263) + fb
+
+    fuv = (x >= 8.0) & (x <= 10.0)
+    xf = x[fuv] - 8.0
+    a[fuv] = -1.073 - 0.628 * xf + 0.137 * xf**2 - 0.070 * xf**3
+    b[fuv] = 13.670 + 4.257 * xf - 0.420 * xf**2 + 0.374 * xf**3
+
+    if np.any((x < 0.3) | (x > 10.0)):
+        raise ValueError("CCM89 is only defined for 1000 A - 3.3 um.")
+    return a_v * (a + b / rv)
 
 
-def deredden_spectrum(wave, flux,error=None, ebv=None, av=None, rv=3.1, law="ccm89" ):
+def deredden_spectrum(wave, flux, error=None, ebv=None, av=None, rv=3.1, law="ccm89"):
     """
     Correct a spectrum for Galactic (foreground) dust extinction.
 
-    Provide *either* `ebv` or `av` (not both) -- `av = rv * ebv`.
+    Give either ``ebv`` or ``av`` (not both); ``av = rv * ebv``. The
+    correction must be applied at *observed* wavelengths.
+
+    Parameters
+    ----------
+    wave, flux : ndarray
+    error : ndarray, optional
+        If given it is dereddened too and both arrays are returned.
+    ebv, av : float
+        E(B-V) or A_V in magnitudes.
+    rv : float
+        Total-to-selective extinction ratio.
+    law : {"ccm89", "fitzpatrick99", "odonnell94", "calzetti00"}
+        Extinction curve. Everything except ``ccm89`` needs the optional
+        ``extinction`` package.
+
+    Returns
+    -------
+    flux_dered or (flux_dered, error_dered)
     """
-    import extinction
+    try:
+        import extinction
+    except ImportError:
+        extinction = None
 
     if (ebv is None) == (av is None):
         raise ValueError("Provide exactly one of `ebv` or `av`.")
@@ -57,14 +112,22 @@ def deredden_spectrum(wave, flux,error=None, ebv=None, av=None, rv=3.1, law="ccm
     if a_v == 0:
         return flux.copy() if error is None else (flux.copy(), np.asarray(error, dtype=float).copy())
 
-    law_map = {
-        "ccm89": extinction.ccm89,
-        "fitzpatrick99": extinction.fitzpatrick99,
-        "odonnell94": extinction.odonnell94,
-        "calzetti00": extinction.calzetti00,
-    }
-    ext_func = law_map.get(law.lower(), extinction.ccm89)
-    a_lambda = ext_func(wave, a_v, rv)
+    if extinction is None:
+        if law.lower() != "ccm89":
+            raise ImportError(
+                f"law='{law}' needs the `extinction` package "
+                "(pip install extinction); only 'ccm89' works without it.")
+        a_lambda = _ccm89_alambda(wave, a_v, rv)
+    else:
+        law_map = {
+            "ccm89": extinction.ccm89,
+            "fitzpatrick99": extinction.fitzpatrick99,
+            "odonnell94": extinction.odonnell94,
+            "calzetti00": extinction.calzetti00,
+        }
+        if law.lower() not in law_map:
+            raise ValueError(f"Unknown extinction law '{law}'. Known: {list(law_map)}")
+        a_lambda = law_map[law.lower()](wave, a_v, rv)
 
     flux_dered = flux * 10 ** (0.4 * a_lambda)
     if error is None:
@@ -73,24 +136,24 @@ def deredden_spectrum(wave, flux,error=None, ebv=None, av=None, rv=3.1, law="ccm
     error_dered = np.asarray(error, dtype=float) * 10 ** (0.4 * a_lambda)
     return flux_dered, error_dered
 
+
 def mask_bad_pixels(wave, flux, error=None, bad_regions=None,
-                     sigma_clip=None, mask_nan=True):
+                    sigma_clip=None, mask_nan=True):
     """
-    Mask telluric regions, cosmic rays, NaNs, and other bad pixels.
+    Build a mask that drops NaNs, zero or negative errors, telluric bands and
+    (optionally) cosmic-ray-like outliers.
 
     Parameters
     ----------
-    wave : ndarray
-    flux : ndarray
+    wave, flux : ndarray
     error : ndarray, optional
     bad_regions : list of (float, float), optional
-        Wavelength intervals to mask out (e.g. telluric bands,
-        chip gaps): ``[(6860, 6890), (7590, 7650)]``.
+        Wavelength intervals to drop, e.g. ``[(6860, 6890), (7590, 7650)]``.
     sigma_clip : float, optional
-        If given, flag flux pixels deviating by more than this many
-        sigma from a smoothed version of the spectrum as cosmic rays.
+        If given, drop pixels that sit more than this many sigma away from a
+        smoothed copy of the spectrum.
     mask_nan : bool
-        Mask NaN/Inf flux or error values.
+        Drop NaN/Inf flux or error values and non-positive errors.
 
     Returns
     -------
@@ -121,32 +184,12 @@ def mask_bad_pixels(wave, flux, error=None, bad_regions=None,
 
 def smooth_spectrum(flux, sigma=3):
     """
-    Gaussian smoothing for visualization (does not alter the data
-    used for fitting; use only for plotting/inspection).
+    Gaussian-smooth a spectrum, for plotting only (do not fit the result).
 
     Parameters
     ----------
     flux : ndarray
     sigma : float
-        Standard deviation of the Gaussian kernel in pixels.
-
-    Returns
-    -------
-    ndarray
-        Smoothed flux array, same shape as input.
+        Kernel width in pixels.
     """
-    flux = np.asarray(flux, dtype=float)
-    return gaussian_filter1d(np.nan_to_num(flux), sigma=sigma)
-    
-    
-def trim_spectrum(wavelength, flux, flux_err=None, wmin=None, wmax=None):
-    """
-    Trim a spectrum to a wavelength range [wmin, wmax].
-    """
-    wavelength = np.asarray(wavelength, dtype=float)
-    mask = (wavelength >= (wmin if wmin is not None else -np.inf)) & \
-           (wavelength <= (wmax if wmax is not None else np.inf))
-
-    if flux_err is None:
-        return wavelength[mask], np.asarray(flux)[mask]
-    return wavelength[mask], np.asarray(flux)[mask], np.asarray(flux_err)[mask]
+    return gaussian_filter1d(np.nan_to_num(np.asarray(flux, dtype=float)), sigma=sigma)

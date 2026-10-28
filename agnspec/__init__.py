@@ -2,40 +2,13 @@
 agnspec
 =======
 
-A component-oriented Python package for fitting AGN (Active Galactic
-Nuclei) optical/UV spectra.
+Fitting tools for AGN optical and UV spectra, built around spectral
+components: a continuum made of a power law, Fe II, a Balmer pseudo-continuum
+and host-galaxy templates, plus emission-line complexes (H-beta, H-alpha,
+Mg II, C IV, [OIII]). Components can be fitted with least squares, MCMC
+(emcee) or nested sampling (dynesty).
 
-The package is organized around *spectral components* rather than
-*fitting steps*:
-
-    AGNModel
-    ├── Continuum
-    │   ├── PowerLaw
-    │   ├── HostGalaxy
-    │   ├── BalmerContinuum
-    │   └── FeII
-    │
-    ├── EmissionLines
-    │   ├── HbetaComplex
-    │   ├── HalphaComplex
-    │   ├── MgIIComplex
-    │   ├── CIVComplex
-    │   └── OIIIComplex
-    │
-    ├── Fitters
-    │   ├── LeastSquares
-    │   ├── MCMC
-    │   └── NestedSampling
-    │
-    ├── Measurements
-    ├── Plotting
-    └── Pipeline
-
-Each physical component (PowerLaw, FeII, HbetaComplex, ...) knows how to
-generate its own model flux and how many/which free parameters it has.
-The `AGNModel` class simply sums the components together, and any of
-the `Fitters` can be attached to optimize the combined parameter
-vector against data.
+Author: Ashwani Pandey
 """
 
 from . import io
@@ -49,6 +22,8 @@ from . import plotting
 from . import utils
 from . import pipeline
 from . import models
+from . import balmer
+from . import optical_region
 
 from .models import AGNModel
 from .pipeline import run_pipeline
@@ -56,7 +31,8 @@ from .pipeline import run_pipeline
 __all__ = [
     "io", "preprocessing", "continuum", "emission_lines", "fitting",
     "measurements", "uncertainties", "plotting", "utils", "pipeline",
-    "models", "AGNModel", "run_pipeline",
+    "models", "balmer", "optical_region", "AGNModel", "run_pipeline",
 ]
 
-__version__ = "0.1.0"
+__author__ = "Ashwani Pandey"
+__version__ = "1.0.1"

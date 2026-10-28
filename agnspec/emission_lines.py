@@ -1,165 +1,54 @@
 """
-emission_lines.py
-==================
+Emission-line complexes.
 
-Emission-line region extraction and Gaussian-component fitting,
-organized around physical line complexes:
+A ``*Complex`` class groups the Gaussian components that are fitted together
+for one spectral region (for example broad + narrow H-beta plus the [OIII]
+doublet, with the doublet's centre and flux ratio tied). Like the continuum
+components, a complex has ``model``, ``initial_guess``, ``bounds`` and
+``free_param_names``, so any fitter in :mod:`agnspec.fitting` can be used on
+it.
 
-    EmissionLines
-    ├── HbetaComplex
-    ├── HalphaComplex
-    ├── MgIIComplex
-    ├── CIVComplex
-    └── OIIIComplex
-
-Each ``*Complex`` class defines the set of Gaussian sub-components
-that make up a spectral region (e.g. broad + narrow Hbeta, the
-[OIII] doublet with a fixed 3:1 flux ratio and common kinematics,
-etc.) and knows how to build an initial guess, bounds, and a combined
-model, exactly like the ``ContinuumComponent`` classes in
-``continuum.py``. This lets :class:`fitting.LeastSquares`,
-:class:`fitting.MCMC`, and :class:`fitting.NestedSampling` operate on
-either continuum or line objects interchangeably.
+Available complexes: :class:`HbetaComplex`, :class:`HalphaComplex`,
+:class:`MgIIComplex`, :class:`CIVComplex` and :class:`OIIIComplex`.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
-from scipy.optimize import curve_fit
-from scipy.integrate import simpson
 
-from .utils import gaussian, multi_gaussian, LINE_WAVELENGTHS, fwhm_to_sigma
+from .utils import gaussian, LINE_WAVELENGTHS
+
+OIII_5007_TO_4959 = 2.98     # [OIII] 5007 / 4959 flux ratio
+NII_6584_TO_6548 = 2.96      # [NII] 6584 / 6548 flux ratio
 
 
-# ----------------------------------------------------------------------
-# Region extraction
-# ----------------------------------------------------------------------
 def extract_region(wave, flux, xmin, xmax):
-    """
-    Extract the sub-array of a spectrum within ``[xmin, xmax]``.
-
-    Parameters
-    ----------
-    wave, flux : ndarray
-    xmin, xmax : float
-
-    Returns
-    -------
-    wave_region, flux_region : ndarray
-    """
+    """Return the part of (wave, flux) with ``xmin <= wave <= xmax``."""
     wave = np.asarray(wave, dtype=float)
     flux = np.asarray(flux, dtype=float)
     sel = (wave >= xmin) & (wave <= xmax)
     return wave[sel], flux[sel]
 
 
-# ----------------------------------------------------------------------
-# Generic Gaussian fitting (procedural convenience functions)
-# ----------------------------------------------------------------------
-def fit_gaussian(wave, flux, p0=None):
-    """
-    Fit a single Gaussian (+ optional local linear background) to a
-    line region.
-
-    Parameters
-    ----------
-    wave, flux : ndarray
-    p0 : sequence, optional
-        Initial guess ``[amplitude, center, sigma]``. If not given, a
-        reasonable guess is derived from the data.
-
-    Returns
-    -------
-    popt : dict
-        {"amplitude":..., "center":..., "sigma":...}
-    model_flux : ndarray
-    """
-    wave = np.asarray(wave, dtype=float)
-    flux = np.asarray(flux, dtype=float)
-
-    if p0 is None:
-        i_max = np.argmax(flux)
-        p0 = [flux[i_max], wave[i_max], (wave.max() - wave.min()) / 10.0]
-
-    lower = [0.0, wave.min(), 0.01]
-    upper = [np.inf, wave.max(), (wave.max() - wave.min())]
-
-    popt, _ = curve_fit(gaussian, wave, flux, p0=p0, bounds=(lower, upper),
-                         maxfev=20000)
-    model_flux = gaussian(wave, *popt)
-    result = dict(zip(["amplitude", "center", "sigma"], popt))
-    return result, model_flux
-
-
-def fit_multiple_gaussians(wave, flux, n_components, p0=None):
-    """
-    Fit ``n_components`` Gaussians simultaneously to a line region.
-
-    Parameters
-    ----------
-    wave, flux : ndarray
-    n_components : int
-    p0 : sequence, optional
-        Flat initial-guess vector of length ``3 * n_components``:
-        ``[amp1, cen1, sig1, amp2, cen2, sig2, ...]``. If not given,
-        components are seeded at evenly spaced positions across the
-        region with equal amplitude fractions of the peak flux.
-
-    Returns
-    -------
-    popt : ndarray, shape (n_components, 3)
-        Best-fit (amplitude, center, sigma) for each component.
-    model_flux : ndarray
-        Combined (summed) model.
-    """
-    wave = np.asarray(wave, dtype=float)
-    flux = np.asarray(flux, dtype=float)
-
-    if p0 is None:
-        centers0 = np.linspace(wave.min(), wave.max(), n_components + 2)[1:-1]
-        p0 = []
-        for c in centers0:
-            p0 += [np.nanmax(flux) / n_components, c,
-                   (wave.max() - wave.min()) / (4 * n_components)]
-
-    lower, upper = [], []
-    for _ in range(n_components):
-        lower += [0.0, wave.min(), 0.01]
-        upper += [np.inf, wave.max(), (wave.max() - wave.min())]
-
-    popt, _ = curve_fit(multi_gaussian, wave, flux, p0=p0,
-                         bounds=(lower, upper), maxfev=50000)
-    model_flux = multi_gaussian(wave, *popt)
-    popt = np.asarray(popt).reshape(n_components, 3)
-    return popt, model_flux
-
-
-# ----------------------------------------------------------------------
-# Gaussian component object (used inside *Complex classes)
-# ----------------------------------------------------------------------
 class GaussianComponent:
     """
-    A single named Gaussian sub-component of a line complex (e.g. the
-    "broad" or "narrow" part of Hbeta).
+    One named Gaussian inside a line complex (for instance the broad part of H-beta).
 
     Parameters
     ----------
     name : str
     rest_wave : float
-        Rest-frame wavelength (Angstrom).
-    kind : str
-        "broad" or "narrow"; used only for bookkeeping / plotting.
+        Rest-frame wavelength in Angstrom.
+    kind : {"broad", "narrow"}
+        Selects the default starting values and sigma bounds.
     tie_center_to : GaussianComponent, optional
-        If given, this component's center is forced to track another
-        component's center via a fixed rest-wavelength offset (e.g.
-        the [OIII] 4959 line tied to [OIII] 5007).
-    flux_ratio_to : Tuple[GaussianComponent, float], optional
-        If given as ``(other_component, ratio)``, this component's
-        amplitude is forced to equal ``ratio`` times the other
-        component's amplitude (e.g. [OIII] 4959 = 1/3 x [OIII] 5007).
+        Keep this line at a fixed rest-wavelength offset from another one
+        (e.g. [OIII] 4959 tied to [OIII] 5007).
+    flux_ratio_to : (GaussianComponent, float), optional
+        Force this line's amplitude to ``ratio`` times the other line's
+        amplitude (e.g. 4959 = 5007 / 2.98).
     """
 
     def __init__(self, name, rest_wave, kind="broad",
@@ -170,10 +59,6 @@ class GaussianComponent:
         self.kind = kind
         self.tie_center_to = tie_center_to
         self.flux_ratio_to = flux_ratio_to
-
-    @property
-    def is_free(self):
-        return self.tie_center_to is None and self.flux_ratio_to is None
 
     @property
     def free_param_names(self):
@@ -188,11 +73,11 @@ class GaussianComponent:
 
 class LineComplex:
     """
-    Base class for a physically-motivated group of emission lines
-    fitted together (e.g. Hbeta + [OIII] doublet).
+    Base class for a group of emission lines fitted together. Subclasses fill
+    ``self.components`` with :class:`GaussianComponent` objects in ``__init__``.
 
-    Subclasses populate ``self.components`` with :class:`GaussianComponent`
-    objects (some tied to others) in ``__init__``.
+    All Gaussian widths and centres are in Angstrom, amplitudes in flux
+    density units.
     """
 
     name = "line_complex"
@@ -208,8 +93,7 @@ class LineComplex:
         return names
 
     def _resolve(self, free_values: Dict[str, float], comp: GaussianComponent):
-        """Resolve (amplitude, center, sigma) for one component given
-        the dict of currently-fitted free parameter values."""
+        """(amplitude, center, sigma) of one component, given the free parameters."""
         sigma = free_values[f"{comp.name}_sigma"]
 
         if comp.tie_center_to is not None:
@@ -239,7 +123,6 @@ class LineComplex:
     def initial_guess(self, wave, flux):
         guess = []
         peak = np.nanmax(flux) if len(flux) else 1.0
-        span = (np.max(wave) - np.min(wave)) if len(wave) else 100.0
         for comp in self.components:
             for pname in comp.free_param_names:
                 if pname.endswith("_amplitude"):
@@ -252,7 +135,7 @@ class LineComplex:
 
     def bounds(self):
         lower, upper = [], []
-        span = 50.0
+        span = 50.0     # allowed shift of a line centre, Angstrom
         for comp in self.components:
             for pname in comp.free_param_names:
                 if pname.endswith("_amplitude"):
@@ -268,65 +151,63 @@ class LineComplex:
 
     def component_fluxes(self, params):
         """
-        Given a best-fit joint parameter vector, return the resolved
-        (amplitude, center, sigma) for every sub-component, keyed by
-        component name.
+        Resolved (amplitude, center, sigma) of every component for a fitted
+        parameter vector, keyed by component name.
         """
         free_values = dict(zip(self.free_param_names, params))
-        out = {}
-        for comp in self.components:
-            out[comp.name] = self._resolve(free_values, comp)
-        return out
+        return {comp.name: self._resolve(free_values, comp) for comp in self.components}
+
+
+def _oiii_doublet(suffix="", kind="narrow"):
+    """[OIII] 5007 plus 4959, with 4959 tied to 5007 in centre and flux."""
+    o5007 = GaussianComponent(f"oiii_5007{suffix}", LINE_WAVELENGTHS["OIII_5007"], kind)
+    o4959 = GaussianComponent(
+        f"oiii_4959{suffix}", LINE_WAVELENGTHS["OIII_4959"], kind,
+        tie_center_to=o5007, flux_ratio_to=(o5007, 1.0 / OIII_5007_TO_4959),
+    )
+    return [o5007, o4959]
 
 
 class HbetaComplex(LineComplex):
-    """
-    H-beta region: broad Hbeta + narrow Hbeta + [OIII]4959,5007
-    doublet (tied kinematics, fixed 3:1 flux ratio).
-    """
+    """Narrow H-beta, optional broad H-beta, optional [OIII] 4959,5007 doublet."""
 
     name = "hbeta_complex"
 
     def __init__(self, include_broad=True, include_oiii=True):
         super().__init__()
-        hb_n = GaussianComponent("hbeta_narrow", LINE_WAVELENGTHS["Hbeta"], "narrow")
-        self.components.append(hb_n)
+        self.components.append(
+            GaussianComponent("hbeta_narrow", LINE_WAVELENGTHS["Hbeta"], "narrow"))
 
         if include_broad:
-            hb_b = GaussianComponent("hbeta_broad", LINE_WAVELENGTHS["Hbeta"], "broad")
-            self.components.append(hb_b)
+            self.components.append(
+                GaussianComponent("hbeta_broad", LINE_WAVELENGTHS["Hbeta"], "broad"))
 
         if include_oiii:
-            oiii_5007 = GaussianComponent("oiii_5007", LINE_WAVELENGTHS["OIII_5007"], "narrow")
-            oiii_4959 = GaussianComponent(
-                "oiii_4959", LINE_WAVELENGTHS["OIII_4959"], "narrow",
-                tie_center_to=oiii_5007, flux_ratio_to=(oiii_5007, 1.0 / 2.98),
-            )
-            self.components += [oiii_5007, oiii_4959]
+            self.components += _oiii_doublet()
 
 
 class HalphaComplex(LineComplex):
     """
-    H-alpha region: broad Halpha + narrow Halpha + [NII]6548,6583
-    doublet (fixed 1:2.96 ratio, tied kinematics) + [SII]6716,6731.
+    Narrow H-alpha, optional broad H-alpha, optional [NII] 6548,6584 doublet
+    (fixed ratio, tied centres) and optional [SII] 6716,6731 pair (tied centres).
     """
 
     name = "halpha_complex"
 
     def __init__(self, include_broad=True, include_nii=True, include_sii=True):
         super().__init__()
-        ha_n = GaussianComponent("halpha_narrow", LINE_WAVELENGTHS["Halpha"], "narrow")
-        self.components.append(ha_n)
+        self.components.append(
+            GaussianComponent("halpha_narrow", LINE_WAVELENGTHS["Halpha"], "narrow"))
 
         if include_broad:
-            ha_b = GaussianComponent("halpha_broad", LINE_WAVELENGTHS["Halpha"], "broad")
-            self.components.append(ha_b)
+            self.components.append(
+                GaussianComponent("halpha_broad", LINE_WAVELENGTHS["Halpha"], "broad"))
 
         if include_nii:
             nii_6584 = GaussianComponent("nii_6584", LINE_WAVELENGTHS["NII_6584"], "narrow")
             nii_6548 = GaussianComponent(
                 "nii_6548", LINE_WAVELENGTHS["NII_6548"], "narrow",
-                tie_center_to=nii_6584, flux_ratio_to=(nii_6584, 1.0 / 2.96),
+                tie_center_to=nii_6584, flux_ratio_to=(nii_6584, 1.0 / NII_6584_TO_6548),
             )
             self.components += [nii_6584, nii_6548]
 
@@ -340,63 +221,46 @@ class HalphaComplex(LineComplex):
 
 
 class MgIIComplex(LineComplex):
-    """MgII 2798 region: broad + narrow MgII."""
+    """Mg II 2798: broad Gaussian plus an optional narrow one."""
 
     name = "mgii_complex"
 
     def __init__(self, include_narrow=True):
         super().__init__()
         self.components.append(
-            GaussianComponent("mgii_broad", LINE_WAVELENGTHS["MgII"], "broad")
-        )
+            GaussianComponent("mgii_broad", LINE_WAVELENGTHS["MgII"], "broad"))
         if include_narrow:
             self.components.append(
-                GaussianComponent("mgii_narrow", LINE_WAVELENGTHS["MgII"], "narrow")
-            )
+                GaussianComponent("mgii_narrow", LINE_WAVELENGTHS["MgII"], "narrow"))
 
 
 class CIVComplex(LineComplex):
-    """CIV 1549 region: broad (+ optional blueshifted-wind) component."""
+    """C IV 1549: broad Gaussian plus an optional second (wind) Gaussian."""
 
     name = "civ_complex"
 
     def __init__(self, include_wind=False):
         super().__init__()
         self.components.append(
-            GaussianComponent("civ_broad", LINE_WAVELENGTHS["CIV"], "broad")
-        )
+            GaussianComponent("civ_broad", LINE_WAVELENGTHS["CIV"], "broad"))
         if include_wind:
             self.components.append(
-                GaussianComponent("civ_wind", LINE_WAVELENGTHS["CIV"], "broad")
-            )
+                GaussianComponent("civ_wind", LINE_WAVELENGTHS["CIV"], "broad"))
 
 
 class OIIIComplex(LineComplex):
     """
-    Standalone [OIII] 4959,5007 doublet (e.g. for cases where Hbeta
-    is not being modeled at all), fixed 3:1 flux ratio, tied
-    kinematics, with an optional second ("wing"/outflow) component
-    tied similarly.
+    [OIII] 4959,5007 on its own (fixed flux ratio, tied centres), with an
+    optional second, broader doublet for an outflow wing.
     """
 
     name = "oiii_complex"
 
     def __init__(self, include_wing=False):
         super().__init__()
-        oiii_5007 = GaussianComponent("oiii_5007", LINE_WAVELENGTHS["OIII_5007"], "narrow")
-        oiii_4959 = GaussianComponent(
-            "oiii_4959", LINE_WAVELENGTHS["OIII_4959"], "narrow",
-            tie_center_to=oiii_5007, flux_ratio_to=(oiii_5007, 1.0 / 2.98),
-        )
-        self.components += [oiii_5007, oiii_4959]
-
+        self.components += _oiii_doublet()
         if include_wing:
-            oiii_5007_w = GaussianComponent("oiii_5007_wing", LINE_WAVELENGTHS["OIII_5007"], "broad")
-            oiii_4959_w = GaussianComponent(
-                "oiii_4959_wing", LINE_WAVELENGTHS["OIII_4959"], "broad",
-                tie_center_to=oiii_5007_w, flux_ratio_to=(oiii_5007_w, 1.0 / 2.98),
-            )
-            self.components += [oiii_5007_w, oiii_4959_w]
+            self.components += _oiii_doublet(suffix="_wing", kind="broad")
 
 
 LINE_COMPLEXES = {

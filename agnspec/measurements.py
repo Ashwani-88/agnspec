@@ -1,20 +1,15 @@
 """
-measurements.py
-================
-
-Derived measurements from fitted models: equivalent widths, line
-fluxes, kinematic widths, luminosities, and black-hole mass /
-Eddington ratio estimates from single-epoch virial relations.
+Quantities derived from a fit: equivalent width, line flux, widths and
+velocity shifts, luminosities, and single-epoch black-hole mass and Eddington
+ratio.
 """
 
 from __future__ import annotations
 
-from typing import Optional, Sequence, Tuple
-
 import numpy as np
 from scipy.integrate import simpson
 
-from .utils import C_KMS, sigma_to_fwhm, fwhm_to_sigma
+from .utils import C_KMS, sigma_to_fwhm
 
 
 def equivalent_width(wave, flux, continuum):
@@ -24,10 +19,8 @@ def equivalent_width(wave, flux, continuum):
 
         EW = integral[ (continuum - flux) / continuum ] dlambda
 
-    A positive EW corresponds to an emission line (flux above the
-    continuum) with this sign convention flipped from the classic
-    absorption-line definition; adjust the sign if you need the
-    opposite convention.
+    With this sign convention an emission line has a positive EW (the
+    opposite of the classic absorption-line convention).
 
     Parameters
     ----------
@@ -60,10 +53,8 @@ def line_flux(model, wave=None):
     Parameters
     ----------
     model : dict or ndarray or callable
-        * If a dict with keys ``amplitude`` and ``sigma`` (as returned
-          by :func:`emission_lines.fit_gaussian`), the analytic
-          Gaussian integral ``sqrt(2 pi) * amplitude * sigma`` is
-          used.
+        * If a dict with keys ``amplitude`` and ``sigma``, the analytic
+          Gaussian integral ``sqrt(2 pi) * amplitude * sigma`` is used.
         * If an ndarray (a model flux array) and ``wave`` is given,
           numerically integrates via Simpson's rule.
     wave : ndarray, optional
@@ -176,39 +167,31 @@ def line_luminosity(flux, luminosity_distance):
 
 def virial_blackhole_mass(fwhm, l5100, calibration="vp06"):
     """
-    Single-epoch virial black-hole mass estimate from the broad-line
-    FWHM and the 5100 A continuum luminosity, following the standard
-    form:
+    Single-epoch virial black-hole mass from the broad H-beta FWHM and the
+    5100 A continuum luminosity:
 
         log(M_BH / Msun) = a + b * log(L5100 / 1e44) + 2 * log(FWHM / 1000 km/s)
 
     Parameters
     ----------
     fwhm : float
-        Broad-line FWHM in km/s (e.g. Hbeta).
+        Broad H-beta FWHM in km/s.
     l5100 : float
-        Monochromatic luminosity lambda*L_lambda at 5100 A, erg/s.
-    calibration : str
-        Coefficients to use:
-          * "vp06"  : Vestergaard & Peterson (2006) Hbeta, a=6.91, b=0.50
-          * "gh05"  : Greene & Ho (2005) Hbeta, a=6.67, b=0.63 (with FWHM
-                       exponent 2 as well; note different luminosity
-                       tracer conventions exist in the literature)
+        lambda * L_lambda at 5100 A in erg/s.
+    calibration : {"vp06"}
+        "vp06" is Vestergaard & Peterson (2006), a = 6.91, b = 0.50.
 
     Returns
     -------
     mbh : float
         Black-hole mass in solar masses.
     """
-    coeffs = {
-        "vp06": (6.91, 0.50),
-        "gh05": (6.67, 0.63),
-    }
-    a, b = coeffs.get(calibration, coeffs["vp06"])
+    coeffs = {"vp06": (6.91, 0.50)}
+    if calibration not in coeffs:
+        raise ValueError(f"Unknown calibration '{calibration}'. Known: {list(coeffs)}")
+    a, b = coeffs[calibration]
 
-    log_l = np.log10(l5100 / 1e44)
-    log_fwhm_term = 2.0 * np.log10(fwhm / 1000.0)
-    log_mbh = a + b * log_l + log_fwhm_term
+    log_mbh = a + b * np.log10(l5100 / 1e44) + 2.0 * np.log10(fwhm / 1000.0)
     return float(10 ** log_mbh)
 
 
@@ -234,9 +217,9 @@ def eddington_ratio(mbh, lbol):
 
 def bolometric_luminosity(l5100, bc=9.26):
     """
-    Estimate AGN bolometric luminosity from the 5100 A monochromatic
-    luminosity using a bolometric correction factor (Richards et al.
-    2006 give BC ~ 9.26 for lambda*L_lambda(5100A)).
+    Bolometric luminosity from the 5100 A monochromatic luminosity with a
+    bolometric correction (Richards et al. 2006 give 9.26 for
+    lambda * L_lambda at 5100 A).
 
     Parameters
     ----------

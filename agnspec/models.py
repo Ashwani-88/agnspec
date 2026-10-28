@@ -1,24 +1,12 @@
 """
-models.py
-=========
-
-Top-level :class:`AGNModel`, the object that ties together a
-continuum model, one or more emission-line complexes, a choice of
-fitter, and convenience methods for measurement/plotting -- i.e. the
-root of the component tree described in the package docstring:
-
-    AGNModel
-    ├── Continuum   (continuum.ContinuumModel)
-    ├── EmissionLines (dict of emission_lines.LineComplex)
-    ├── Fitters     (fitting.LeastSquares / MCMC / NestedSampling)
-    ├── Measurements (measurements module, applied post-fit)
-    └── Plotting    (plotting module, applied post-fit)
+:class:`AGNModel` ties a continuum model, any number of emission-line
+complexes and a fitter together, and offers short-cuts for measuring and
+plotting the result.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -31,8 +19,8 @@ from . import plotting as plots
 
 class AGNModel:
     """
-    Full AGN spectral model: continuum + one or more emission-line
-    complexes, with pluggable fitting backends.
+    A continuum model plus one or more emission-line complexes, fitted with
+    whichever fitter you choose.
 
     Parameters
     ----------
@@ -61,13 +49,6 @@ class AGNModel:
         self.flux = None
         self.error = None
 
-    # ------------------------------------------------------------------
-    # Construction helpers
-    # ------------------------------------------------------------------
-    def add_continuum_component(self, component: ContinuumComponent):
-        self.continuum.add(component)
-        return self
-
     def add_line_complex(self, name: str, complex_obj: Optional[LineComplex] = None, **kwargs):
         """
         Attach a named emission-line complex. If ``complex_obj`` is
@@ -84,9 +65,6 @@ class AGNModel:
         self.line_complexes[name] = complex_obj
         return self
 
-    # ------------------------------------------------------------------
-    # Fitting
-    # ------------------------------------------------------------------
     def fit_continuum(self, wave, flux, error=None, continuum_windows=None):
         """Fit the continuum model to (typically line-masked) data."""
         from .continuum import get_continuum_mask
@@ -145,18 +123,14 @@ class AGNModel:
             results[name] = self.fit_line(name, w, f, e)
         return results
 
-    # ------------------------------------------------------------------
-    # Measurements
-    # ------------------------------------------------------------------
-    def measure_line(self, name, rest_wave=None):
+    def measure_line(self, name):
         """
-        Compute standard measurements (flux, FWHM, velocity shift,
-        velocity dispersion) for every sub-component of a fitted line
-        complex.
+        Flux, FWHM (Angstrom), velocity dispersion and velocity shift (km/s)
+        of every Gaussian in a fitted line complex.
 
         Returns
         -------
-        dict of {component_name: {"flux":..., "fwhm":..., ...}}
+        dict of {component_name: {"flux": ..., "fwhm": ..., ...}}
         """
         if name not in self.line_results:
             raise RuntimeError(f"Line complex '{name}' has not been fit yet.")
@@ -179,9 +153,6 @@ class AGNModel:
             }
         return out
 
-    # ------------------------------------------------------------------
-    # Plotting
-    # ------------------------------------------------------------------
     def plot_continuum(self, ax=None):
         model_flux = self.continuum_flux()
         components = self.continuum.component_models(self.wave, self.continuum_result.params)
@@ -198,7 +169,6 @@ class AGNModel:
         return plots.plot_line_fit(wave, flux, model_flux, components=resolved,
                                     continuum=continuum, ax=ax)
 
-    # ------------------------------------------------------------------
     def summary(self):
         """Return a flat dict of all fitted parameters, ready for saving."""
         out = {}

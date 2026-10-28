@@ -4,24 +4,40 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agnspec"
-version = "0.1.0"
-description = "A component-oriented package for fitting AGN optical/UV spectra."
+dynamic = ["version"]
+description = "Component-based fitting of AGN optical and UV spectra: power law, Fe II, Balmer pseudo-continuum and emission-line complexes."
 readme = "README.md"
 requires-python = ">=3.9"
 license = {text = "MIT"}
-authors = [{name = "Your Name"}]
+authors = [{name = "Ashwani Pandey"}]
+keywords = ["astronomy", "AGN", "quasar", "spectral fitting", "Fe II", "Balmer continuum", "MCMC"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Astronomy",
+]
 dependencies = [
     "numpy>=1.21",
     "scipy>=1.7",
     "matplotlib>=3.4",
     "astropy>=5.0",
+    "requests>=2.25",
 ]
 
 [project.optional-dependencies]
 mcmc = ["emcee>=3.1"]
 nested = ["dynesty>=2.0"]
-extinction = ["dust_extinction>=1.0"]
-all = ["emcee>=3.1", "dynesty>=2.0", "dust_extinction>=1.0"]
+extinction = ["extinction>=0.4"]
+pyneb = ["pyneb>=1.1"]
+examples = ["jupyter", "extinction>=0.4"]
+all = ["emcee>=3.1", "dynesty>=2.0", "extinction>=0.4", "pyneb>=1.1", "jupyter"]
+
+[tool.setuptools.dynamic]
+version = {attr = "agnspec.__version__"}
 
 [tool.setuptools.packages.find]
 include = ["agnspec*"]
+
+[tool.setuptools.package-data]
+agnspec = ["data/*.dat", "data/*.ipac"]

@@ -1,52 +1,36 @@
 """
-pipeline.py
-============
+``run_pipeline``: read a spectrum, deredden, shift to the rest frame, fit a
+power-law continuum, subtract it, fit one emission-line complex, measure the
+lines, estimate bootstrap errors, make plots and save everything.
 
-End-to-end pipeline gluing together every stage:
-
-    Read spectrum
-        |
-    Preprocess (rest-frame, deredden, mask bad pixels)
-        |
-    Fit continuum
-        |
-    Subtract continuum
-        |
-    Fit emission lines
-        |
-    Measure line properties
-        |
-    Estimate uncertainties
-        |
-    Generate plots
-        |
-    Save outputs
+This is the quick, single-complex route. For anything more involved (Fe II,
+the Balmer pseudo-continuum, MCMC) build the model yourself as shown in the
+example notebooks.
 """
 
 from __future__ import annotations
 
 import os
-from typing import Dict, Optional, Sequence, Tuple
+from typing import Optional, Sequence, Tuple
 
 import numpy as np
 
 from . import io as agn_io
 from . import preprocessing as prep
 from .continuum import PowerLaw, get_continuum_mask
-from .emission_lines import LINE_COMPLEXES, extract_region
+from .emission_lines import extract_region
 from .fitting import LeastSquares
 from .models import AGNModel
 from . import uncertainties as unc
 from . import plotting as plots
 
-# Default continuum-only windows (rest-frame, Angstrom) -- adjust as
-# needed for the wavelength coverage of your spectra.
+# Default line-free continuum windows (rest frame, Angstrom). Adjust them to
+# the wavelength coverage of your spectra.
 DEFAULT_CONTINUUM_WINDOWS = [
     (4200, 4230), (5080, 5130), (6000, 6050), (7450, 7550),
 ]
 
-# Default fitting windows around each supported line complex
-# (rest-frame, Angstrom).
+# Default fitting window around each supported line complex (rest frame, Angstrom).
 DEFAULT_LINE_WINDOWS = {
     "Hbeta": (4750, 5100),
     "Halpha": (6400, 6800),
@@ -63,7 +47,7 @@ def run_pipeline(filename: str, z: float, ebv: float = 0.0, line: str = "Hbeta",
                   fitter=None, n_boot: int = 200,
                   output_dir: Optional[str] = None, make_plots: bool = True):
     """
-    Run the full AGN spectral-fitting pipeline on a single spectrum.
+    Fit one emission-line complex in a single spectrum, start to finish.
 
     Parameters
     ----------
@@ -113,11 +97,19 @@ def run_pipeline(filename: str, z: float, ebv: float = 0.0, line: str = "Hbeta",
     wave_obs, flux_obs, error_obs, header = agn_io.read_spectrum(filename)
 
     # ---- 2. Deredden (Galactic, observed frame) -------------------
-    flux_dered = prep.deredden_galactic(wave_obs, flux_obs, ebv=ebv)
+    if ebv:
+        if error_obs is not None:
+            flux_dered, error_dered = prep.deredden_spectrum(
+                wave_obs, flux_obs, error=error_obs, ebv=ebv)
+        else:
+            flux_dered, error_dered = prep.deredden_spectrum(wave_obs, flux_obs, ebv=ebv), None
+    else:
+        flux_dered, error_dered = flux_obs, error_obs
 
-    # ---- 3. Shift to rest frame ------------------------------------
-    wave_rest, flux_rest = prep.to_rest_frame(wave_obs, flux_dered, z)
-    error_rest = error_obs * (1.0 + z) if error_obs is not None else None
+    # ---- 3. Shift to rest frame (wavelength ONLY; flux untouched) ----
+    wave_rest = prep.to_rest_frame(wave_obs, z)
+    flux_rest = flux_dered
+    error_rest = error_dered
 
     # ---- 4. Mask bad pixels -----------------------------------------
     good = prep.mask_bad_pixels(wave_rest, flux_rest, error_rest, bad_regions=bad_regions)
@@ -147,7 +139,7 @@ def run_pipeline(filename: str, z: float, ebv: float = 0.0, line: str = "Hbeta",
     # ---- 8. Measure line properties ------------------------------------
     line_measurements = model.measure_line(line)
 
-    # ---- 9. Estimate uncertainties (bootstrap on top of the point fit) --
+    # ---- 9. Bootstrap uncertainties --
     boot_summary = {}
     if n_boot and n_boot > 0:
         complex_obj = model.line_complexes[line]
@@ -156,7 +148,7 @@ def run_pipeline(filename: str, z: float, ebv: float = 0.0, line: str = "Hbeta",
                 w_line, f_line, e_line, complex_obj, n_boot=n_boot, fitter=fitter,
             )
             boot_summary = dict(zip(complex_obj.free_param_names, param_std))
-        except Exception as exc:  # pragma: no cover - best effort
+        except Exception as exc:
             boot_summary = {"bootstrap_error": str(exc)}
 
     # ---- 10. Generate plots ---------------------------------------------

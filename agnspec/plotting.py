@@ -1,9 +1,6 @@
 """
-plotting.py
-============
-
-Diagnostic plots: raw spectrum, continuum fits, and emission-line
-fits (with individual sub-components overplotted).
+Plots for each step of a fit: the spectrum at any preprocessing stage, the
+continuum windows, continuum and line fits, and the Balmer pseudo-continuum fit.
 """
 
 from __future__ import annotations
@@ -13,38 +10,18 @@ from typing import Dict, Optional
 import numpy as np
 import matplotlib.pyplot as plt
 
-
-
-# Default y-axis unit string, used when the caller doesn't specify one
-# explicitly. This is only a *guess* -- real flux-calibrated spectra
-# vary a lot in normalization (e.g. SDSS spectra are typically in
-# units of 1e-17 erg/s/cm^2/Angstrom, not erg/s/cm^2/Angstrom). Pass
-# `flux_unit=...` to any plotting function below to override it, or
-# use `flux_unit_from_header()` to pull it from the FITS header
-# returned by `io.read_spectrum`.
+# Used for the y-axis label when no unit is passed. SDSS spectra are usually
+# scaled by 1e-17, so pass flux_unit=... (or flux_unit_from_header(header)) to
+# get the right label for your data.
 DEFAULT_FLUX_UNIT = r"erg s$^{-1}$ cm$^{-2}$ $\mathrm{\AA}^{-1}$"
 
 
 def flux_unit_from_header(header, default=DEFAULT_FLUX_UNIT):
     """
-    Build a y-axis unit string from a spectrum's FITS header, falling
-    back to ``default`` if no relevant keyword is found.
-
-    Looks for a ``BUNIT`` keyword (and, failing that, common SDSS-style
-    ``FLUXUNIT``/``BSCALE`` conventions). The raw header string is
-    returned as-is (not LaTeX-formatted), since header unit strings
-    are inconsistent enough that guessing a "pretty" version is more
-    likely to mislead than help -- pass an explicit ``flux_unit=``
-    string to any plotting function if you want LaTeX formatting.
-
-    Parameters
-    ----------
-    header : dict
-    default : str
-
-    Returns
-    -------
-    str
+    Build a y-axis unit string from a FITS header. Looks for ``BUNIT``,
+    ``FLUXUNIT`` or ``TUNIT2`` and returns the raw string, or ``default`` if
+    none is present. Header unit strings are not LaTeX-formatted; pass your
+    own ``flux_unit=`` to a plotting function if you want that.
     """
     if not header:
         return default
@@ -58,29 +35,16 @@ def flux_unit_from_header(header, default=DEFAULT_FLUX_UNIT):
 def _ylabel(flux_unit):
     flux_unit = flux_unit if flux_unit is not None else DEFAULT_FLUX_UNIT
     return f"Flux density [{flux_unit}]"
-    
-# Presentation defaults for each stage of the preprocessing pipeline.
-# "stage" controls the x-axis label (observed vs. rest frame) and the
-# default line label/color, so plot_spectrum() can be reused as-is for
-# raw, extinction-corrected, and rest-frame spectra -- including
-# overlaying several stages on the same Axes for a quick QA look.
+
+
+# Label, colour and x-axis label for each stage passed to plot_spectrum.
 _STAGE_INFO = {
     "raw": {
         "xlabel": r"Observed-frame Wavelength [$\mathrm{\AA}$]",
         "label": "Raw spectrum",
         "color": "0.15",
     },
-    "observed": {  # alias of "raw"
-        "xlabel": r"Observed-frame Wavelength [$\mathrm{\AA}$]",
-        "label": "Observed spectrum",
-        "color": "0.15",
-    },
     "dered": {
-        "xlabel": r"Observed-frame Wavelength [$\mathrm{\AA}$]",
-        "label": "Extinction-corrected spectrum",
-        "color": "steelblue",
-    },
-    "extinction_corrected": {  # alias of "dered"
         "xlabel": r"Observed-frame Wavelength [$\mathrm{\AA}$]",
         "label": "Extinction-corrected spectrum",
         "color": "steelblue",
@@ -90,73 +54,47 @@ _STAGE_INFO = {
         "label": "Smoothed spectrum",
         "color": "crimson",
     },
-    "rest": {  # alias of "rest"
+    "rest": {
         "xlabel": r"Rest-frame Wavelength [$\mathrm{\AA}$]",
-        "label": "rest-frame spectrum",
-        "color": "crimson",
+        "label": "Rest-frame spectrum",
+        "color": "black",
     },
 }
 
 
 def plot_spectrum(wave, flux, error=None, ax=None, stage="raw",
-                   label=None, color=None, flux_unit=None,
-                   save=None, dpi=150, **kwargs):
+                  label=None, color=None, flux_unit=None,
+                  save=None, dpi=150, **kwargs):
     """
-    Plot a spectrum at any stage of preprocessing: raw (observed),
-    extinction-corrected, or rest-frame.
+    Plot a spectrum at one stage of preprocessing. Call it several times with
+    the same ``ax`` to overlay stages.
 
     Parameters
     ----------
     wave, flux : ndarray
     error : ndarray, optional
-        If given, plotted as a shaded 1-sigma band.
+        Drawn as a shaded 1-sigma band.
     ax : matplotlib.axes.Axes, optional
-        Pass an existing Axes to overlay several stages on one plot
-        (e.g. raw + extinction-corrected + rest-frame together).
-    stage : str
-        One of ``"raw"``/``"observed"``, ``"dered"``/``"extinction_corrected"``,
-        or ``"rest"``/``"rest_frame"``. Controls the default line
-        label/color and the x-axis label (observed- vs rest-frame
-        wavelength). Unrecognized values fall back to "raw" styling.
-    label : str, optional
-        Overrides the default legend label for this ``stage``.
-    color : str, optional
-        Overrides the default line color for this ``stage``.
+    stage : {"raw", "dered", "smooth", "rest"}
+        Sets the default label and colour, and whether the x-axis is labelled
+        observed-frame ("raw", "dered") or rest-frame ("smooth", "rest").
+    label, color : str, optional
+        Override the defaults for the stage.
     flux_unit : str, optional
-        Unit string shown in the y-axis label, e.g.
-        ``r"10$^{-17}$ erg s$^{-1}$ cm$^{-2}$ $\\mathrm{\\AA}^{-1}$"``
-        for typical SDSS-scaled spectra, or the output of
-        :func:`flux_unit_from_header`. Defaults to
-        :data:`DEFAULT_FLUX_UNIT` if not given.
+        Unit shown in the y-axis label, e.g.
+        ``r"10$^{-17}$ erg s$^{-1}$ cm$^{-2}$ $\\mathrm{\\AA}^{-1}$"``.
+    save : str, optional
+        If given, the figure is also written to this path.
     **kwargs
-        Passed through to ``ax.plot``.
+        Passed to ``ax.plot``.
 
     Returns
     -------
     ax : matplotlib.axes.Axes
-
-    Examples
-    --------
-    Plot each stage on its own figure, with the real flux unit for
-    SDSS-style spectra::
-
-        unit = r"10$^{-17}$ erg s$^{-1}$ cm$^{-2}$ $\\mathrm{\\AA}^{-1}$"
-        plot_spectrum(wave_obs, flux_obs, stage="raw", flux_unit=unit)
-        plot_spectrum(wave_obs, flux_dered, stage="extinction_corrected", flux_unit=unit)
-        plot_spectrum(wave_rest, flux_rest, error=error_rest, stage="rest_frame", flux_unit=unit)
-
-    Or pull the unit straight from the file header::
-
-        wave, flux, error, header = read_spectrum("rm160.fits")
-        plot_spectrum(wave, flux, stage="raw", flux_unit=flux_unit_from_header(header))
-
-    Overlay all three stages for a quick before/after comparison::
-
-        ax = plot_spectrum(wave_obs, flux_obs, stage="raw", flux_unit=unit)
-        plot_spectrum(wave_obs, flux_dered, ax=ax, stage="extinction_corrected", flux_unit=unit)
-        plot_spectrum(wave_rest, flux_rest, ax=ax, stage="rest_frame", flux_unit=unit)
     """
-    info = _STAGE_INFO.get(stage, _STAGE_INFO["raw"])
+    if stage not in _STAGE_INFO:
+        raise ValueError(f"Unknown stage '{stage}'. Use one of {list(_STAGE_INFO)}.")
+    info = _STAGE_INFO[stage]
     label = label if label is not None else info["label"]
     color = color if color is not None else info["color"]
 
@@ -177,39 +115,8 @@ def plot_spectrum(wave, flux, error=None, ax=None, stage="raw",
     return ax
 
 
-def compare_spectra(stages, ax=None):
-    """
-    Overlay multiple pipeline stages of the *same* spectrum on one
-    Axes, e.g. to visually confirm dereddening and the rest-frame
-    shift did what you expect.
-
-    Parameters
-    ----------
-    stages : list of dict
-        Each dict describes one call to :func:`plot_spectrum`, e.g.::
-
-            [
-                {"wave": wave_obs,  "flux": flux_obs,   "stage": "raw"},
-                {"wave": wave_obs,  "flux": flux_dered, "stage": "extinction_corrected"},
-                {"wave": wave_rest, "flux": flux_rest,  "stage": "rest_frame", "error": error_rest},
-            ]
-
-    ax : matplotlib.axes.Axes, optional
-
-    Returns
-    -------
-    ax : matplotlib.axes.Axes
-    """
-    for s in stages:
-        s = dict(s)
-        wave = s.pop("wave")
-        flux = s.pop("flux")
-        ax = plot_spectrum(wave, flux, ax=ax, **s)
-    return ax
-
-
 def plot_continuum_fit(wave, flux, model, components: Optional[Dict[str, np.ndarray]] = None,
-                        ax=None, mask=None):
+                       ax=None, mask=None, flux_unit=None):
     """
     Plot the observed spectrum together with the fitted continuum
     model (and, optionally, its individual components).
@@ -246,13 +153,13 @@ def plot_continuum_fit(wave, flux, model, components: Optional[Dict[str, np.ndar
                 color="dodgerblue", label="continuum windows", zorder=5)
 
     ax.set_xlabel(r"Rest-frame Wavelength [$\mathrm{\AA}$]")
-    ax.set_ylabel(r"Flux density [erg s$^{-1}$ cm$^{-2}$ $\mathrm{\AA}^{-1}$]")
+    ax.set_ylabel(_ylabel(flux_unit))
     ax.legend(loc="best", frameon=False, fontsize=8)
     return ax
 
 
 def plot_line_fit(wave, flux, model, components: Optional[Dict[str, np.ndarray]] = None,
-                   continuum=None, ax=None, residual_panel=True):
+                  continuum=None, ax=None, residual_panel=True):
     """
     Plot an emission-line-region fit: data, combined model, and
     (optionally) each Gaussian sub-component, with a residual panel.
@@ -325,13 +232,11 @@ def plot_line_fit(wave, flux, model, components: Optional[Dict[str, np.ndarray]]
         ax_main.set_xlabel(r"Rest-frame Wavelength [$\mathrm{\AA}$]")
 
     return fig, axes
-    
-    
+
+
 def plot_continuum_windows(wave, flux, mask, error=None, ax=None,
-                            flux_unit=None, stage="rest", save=None):
-    """
-    Plot the spectrum with the continuum-fitting mask shaded.
-    """
+                           flux_unit=None, stage="rest", save=None):
+    """Plot the spectrum and shade the pixels selected by the continuum mask."""
     wave = np.asarray(wave)
     mask = np.asarray(mask, dtype=bool)
 
@@ -344,4 +249,70 @@ def plot_continuum_windows(wave, flux, mask, error=None, ax=None,
     if save is not None:
         ax.figure.savefig(save, dpi=150, bbox_inches='tight')
 
-    return ax    
+    return ax
+
+
+def plot_balmer_fit(wave, flux, powerlaw, balmer_lines, balmer_continuum,
+                    flux_clean=None, fit_mask=None, flux_unit=None,
+                    title=None, save=None, dpi=150, ylim=None, ylim_resid=None):
+    """
+    Two-panel plot in the style of Fig. 2 of Kovacevic, Popovic & Kollatschny
+    (2014).
+
+    Top panel: data, the Balmer continuum plus high-order Balmer lines
+    (dotted), the power law (dashed) and the total (solid).
+    Bottom panel: data minus (Balmer continuum + power law). The high-order
+    Balmer lines stay in this residual, and the model lines are drawn dotted
+    on top of it.
+
+    Parameters
+    ----------
+    wave, flux : ndarray
+        Rest-frame wavelength and the (dereddened) spectrum.
+    powerlaw, balmer_lines, balmer_continuum : ndarray
+        Model components evaluated on ``wave``.
+    flux_clean : ndarray, optional
+        Spectrum with the narrow lines and Fe II removed, drawn over the data.
+    fit_mask : ndarray of bool, optional
+        Pixels that were used in the fit.
+    """
+    wave = np.asarray(wave, dtype=float)
+    pseudo = np.asarray(balmer_lines) + np.asarray(balmer_continuum)
+    total = pseudo + np.asarray(powerlaw)
+
+    fig, (ax1, ax2) = plt.subplots(
+        2, 1, figsize=(8, 9), sharex=True,
+        gridspec_kw={"height_ratios": [1.15, 1], "hspace": 0.08})
+
+    ax1.plot(wave, flux, color="0.55", lw=0.7, label="data")
+    if flux_clean is not None:
+        ax1.plot(wave, flux_clean, color="k", lw=0.7, label="data (narrow lines + Fe II removed)")
+    if fit_mask is not None:
+        ax1.plot(wave[fit_mask], (flux_clean if flux_clean is not None else flux)[fit_mask],
+                 ".", ms=2, color="dodgerblue", label="pixels used in fit", zorder=5)
+    ax1.plot(wave, pseudo, ls=":", color="C3", lw=1.6,
+             label="Balmer cont. + high-order Balmer lines")
+    ax1.plot(wave, powerlaw, ls="--", color="C0", lw=1.4, label="power law")
+    ax1.plot(wave, total, color="C3", lw=1.8, label="sum")
+    ax1.set_ylabel(_ylabel(flux_unit))
+    if ylim:
+        ax1.set_ylim(*ylim)
+    ax1.legend(frameon=False, fontsize=8, loc="upper right")
+    if title:
+        ax1.set_title(title, fontsize=10)
+
+    bc_pl = np.asarray(balmer_continuum) + np.asarray(powerlaw)
+    ax2.plot(wave, np.asarray(flux) - bc_pl, color="k", lw=0.7,
+             label="data - (Balmer cont. + power law)")
+    ax2.plot(wave, np.asarray(balmer_lines), color="C3", lw=1.0, ls=":",
+             label="high-order Balmer lines (model)")
+    ax2.axhline(0, color="0.5", lw=0.6)
+    ax2.set_xlabel(r"Rest-frame Wavelength [$\mathrm{\AA}$]")
+    ax2.set_ylabel(_ylabel(flux_unit))
+    if ylim_resid:
+        ax2.set_ylim(*ylim_resid)
+    ax2.legend(frameon=False, fontsize=8, loc="upper right")
+
+    if save is not None:
+        fig.savefig(save, dpi=dpi, bbox_inches="tight")
+    return fig, (ax1, ax2)
